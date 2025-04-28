@@ -2,16 +2,28 @@ from sqlmodel import SQLModel, Field, create_engine, Session, select
 from fastapi import FastAPI, HTTPException
 #from pydantic import BaseModel,Field    
 from datetime import date
-from collections.abc import Optional, Sequence
+from collections.abc import Sequence
 from collections import defaultdict
+from contextlib import asynccontextmanager
 
-app = FastAPI(lifespan="on_startup")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    create_db_and_tables()
+    yield
 
+app = FastAPI(lifespan=lifespan)
 
+# Define the Expense model
 class Expense(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    category: str = Field(max_length=50, description="Category of the expense", example="Food")
-    amount: float = Field(gt=0, description="Amount must be greater than 0", example=100.50)
+    id: int | None = Field(default=None, primary_key=True)
+    category: str = Field(max_length=50, description="Category of the expense")
+    amount: float = Field(gt=0, description="Amount must be greater than 0")
+    date: date
+
+
+class ExpenseCreate(SQLModel):
+    category: str = Field(max_length=50)
+    amount: float = Field(gt=0)
     date: date
 
 #database connection
@@ -23,23 +35,24 @@ engine = create_engine(sqlite_url, echo=True)
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine)
 
-# Call the function to create the database and tables on api startup
-def on_startup():
-    create_db_and_tables()
-
 #expenses_list = []
 
 @app.get("/")
 def root():
     return {"message": "Hello, World!"}
 
-@app.post("/expenses/", response_model=Sequence[Expense])
-def create_expense(expense: Expense):
-    with Session(engine) as session:
-        session.add(expense)
-        session.commit()
-        session.refresh(expense)
-    return expense
+@app.post("/expenses/", response_model=Expense)
+def create_expense(expense: ExpenseCreate):
+    new_expense = Expense(**expense.model_dump())
+    try:
+        with Session(engine) as session:
+            session.add(new_expense)
+            session.commit()
+            session.refresh(new_expense)
+        return new_expense
+    except Exception as e:
+        print("🚨 Exception occurred:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/expenses/", response_model=Sequence[Expense])
 def get_all_expenses():
@@ -82,16 +95,18 @@ def get_summary(min_amount: float = 0):
 
 @app.delete("/expenses/{index}", response_model=dict)
 def delete_expense(index: int):
-    with Session(engine) as session:
-        deleted_expense = session.exec(select(Expense).where(Expense.id == index)).one()
-
-    if not deleted_expense:
-        raise HTTPException(status_code=404, detail="Expense index not found")
-
-    session.delete(deleted_expense)
-    session.commit()
-    session.refresh(deleted_expense)
-
+    if not index:
+        raise HTTPException(status_code=400, detail="Expense index is required")
+    try:
+        with Session(engine) as session:
+            deleted_expense = session.exec(select(Expense).where(Expense.id == index)).one()
+            session.delete(deleted_expense)
+            session.commit()
+        if not deleted_expense:
+            raise HTTPException(status_code=404, detail="Expense index not found")
+    except Exception as e:
+        print("🚨 Exception occurred:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
     return {"message":f"Deleted expense at {index} --> {deleted_expense}"}
 
@@ -100,18 +115,22 @@ def delete_expense(index: int):
 def update_expense(index: int, expense: Expense):
     with Session(engine) as session:
         updated_expense = session.exec(select(Expense).where(Expense.id == index)).one()
+        update = expense.model_dump(exclude_unset=True)
+        for key, value in update.items():
+            setattr(updated_expense, key, value)
+
+        session.add(updated_expense)
+        session.commit()
+        session.refresh(updated_expense)
+    
     if not updated_expense:
         raise HTTPException(status_code=404, detail="Expense index not found")
-    updated_expense = expense
-    session.add(updated_expense)
-    session.commit()
-    session.refresh(updated_expense)
     return updated_expense
 
 @app.get("/expenses/search/", response_model=Sequence[Expense])
 def search_expenses(q: str | None = None):
     if not q:
-        return Expense
+        raise HTTPException(status_code=400, detail="Query parameter is required")
 
     with Session(engine) as session:
         searched_expenses = session.exec(select(Expense).where(
