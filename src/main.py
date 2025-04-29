@@ -1,4 +1,4 @@
-from sqlmodel import SQLModel, Field, create_engine, Session, select
+from sqlmodel import SQLModel, Field, create_engine, Session, select, func
 from fastapi import FastAPI, HTTPException
 #from pydantic import BaseModel,Field    
 from datetime import date
@@ -62,18 +62,21 @@ def get_all_expenses():
         raise HTTPException(status_code=404, detail="No expenses found")
     return expenses
 
-@app.get("/expenses/{category}", response_model=Sequence[Expense])
+@app.get("/expenses/category/{category}", response_model=Sequence[Expense])
 def get_category_based_expenses(category: str):
     if not category:
         raise HTTPException(status_code=400, detail="Category is required")
-    with Session(engine) as session:
-        expenses_result = session.exec(select(Expense).where(
-            Expense.category.casefold() == category.casefold())
-        ).all()
-    if not expenses_result:
+    try:
+        with Session(engine) as session:
+            expenses = session.exec(select(Expense).where(
+                func.lower(Expense.category) == category.lower())
+            ).all()
+    except Exception as e:
+        print("🚨 Exception occurred:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    if not expenses:
         raise HTTPException(status_code=404, detail="No expenses found")
-    return expenses_result
-
+    return expenses
 
 @app.get("/expenses/summary/{min_amount}", response_model=dict)
 def get_summary(min_amount: float = 0):
@@ -134,7 +137,7 @@ def search_expenses(q: str | None = None):
 
     with Session(engine) as session:
         searched_expenses = session.exec(select(Expense).where(
-            Expense.category.casefold() == q.casefold()
+            func.lower(Expense.category) == q.lower()
         )).all()
 
     if not searched_expenses:
